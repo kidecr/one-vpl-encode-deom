@@ -45,7 +45,7 @@ int main(int argc, char* argv[])
 	// 2.1.设置编码方式：sw hw
 	mfxConfig implConfig = MFXCreateConfig(loader); // 创建配置文件
 	VERIFY(NULL != implConfig, "MFXCreateConfig failed");
-	mfxVariant implValue;							// 创建参数
+	mfxVariant implValue = {0};							// 创建参数
 	implValue.Type = MFX_VARIANT_TYPE_U32;			// 设置参数数据类型
 	implValue.Data.U32 = useHardware ? MFX_IMPL_TYPE_HARDWARE : MFX_IMPL_TYPE_SOFTWARE;	//设置参数值
 	sts = MFXSetConfigFilterProperty(implConfig, (mfxU8*)"mfxImplDescription.Impl", implValue);	// 设置参数，中间字符串怎么填看mfxImplDescription或 https://spec.oneapi.io/versions/latest/elements/oneVPL/source/programming_guide/VPL_prg_session.html#onevpl-dispatcher-configuration-properties
@@ -54,12 +54,20 @@ int main(int argc, char* argv[])
 	// 2.2.设置编码器
 	mfxConfig codecConfig = MFXCreateConfig(loader);
 	VERIFY(NULL != implConfig, "MFXCreateConfig failed");
-	mfxVariant codecValue;
+	mfxVariant codecValue = {0};
 	codecValue.Type = MFX_VARIANT_TYPE_U32;
 	codecValue.Data.U32 = MFX_CODEC_AVC;		// 设置CODEC类型：MFX_CODEC_*，具体可以看CodecFormatFourCC
 	sts = MFXSetConfigFilterProperty(codecConfig, (mfxU8*)"mfxImplDescription.mfxEncoderDescription.encoder.CodecID", codecValue);	// 设置参数
 	VERIFY(MFX_ERR_NONE == sts, "MFXSetConfigFilterProperty failed for encoder CodecID");
-	// 2.3.设置API版本(可以不用)，关于vpl是如何搜索API版本的，https://spec.oneapi.io/versions/latest/elements/oneVPL/source/programming_guide/VPL_prg_session.html
+	// 2.3.设置vpp Implementation must provide VPP scaling
+    mfxConfig vppCodecConfig = MFXCreateConfig(loader);
+    VERIFY(NULL != vppCodecConfig, "MFXCreateConfig failed")
+    mfxVariant vppCodecValue = {0};
+    vppCodecValue.Type     = MFX_VARIANT_TYPE_U32;
+    vppCodecValue.Data.U32 = MFX_EXTBUFF_VPP_SCALING;
+    sts = MFXSetConfigFilterProperty(vppCodecConfig, (mfxU8 *)"mfxImplDescription.mfxVPPDescription.filter.FilterFourCC", vppCodecValue);
+    VERIFY(MFX_ERR_NONE == sts, "MFXSetConfigFilterProperty failed");
+    // 2.3.设置API版本(可以不用)，关于vpl是如何搜索API版本的，https://spec.oneapi.io/versions/latest/elements/oneVPL/source/programming_guide/VPL_prg_session.html
 	//mfxConfig apiVersionConfig = MFXCreateConfig(loader);
 	//VERIFY(NULL != apiVersionConfig, "MFXCreateConfig failed")
 	//mfxVariant apiVersionValue;
@@ -80,17 +88,16 @@ int main(int argc, char* argv[])
 
     // 4.初始化编码器
     // 4.1.设置参数 
-    mfxVideoParam encodeParams; // 参数解释 https://spec.oneapi.io/versions/latest/elements/oneVPL/source/API_ref/VPL_structs_cross_component.html?highlight=mfxvideoparam#mfxvideoparam
-    encodeParams.mfx.CodecId = MFX_CODEC_AVC;  // 编码器
-    encodeParams.mfx.CodecProfile = MFX_PROFILE_AVC_CONSTRAINED_BASELINE;   // 使用默认配置参数
+    mfxVideoParam encodeParams = {0}; // 参数解释 https://spec.oneapi.io/versions/latest/elements/oneVPL/source/API_ref/VPL_structs_cross_component.html?highlight=mfxvideoparam#mfxvideoparam
+    encodeParams.mfx.CodecId = MFX_CODEC_HEVC;  // 编码器
+    // encodeParams.mfx.CodecProfile = MFX_PROFILE_AVC_CONSTRAINED_BASELINE;   // 使用默认配置参数
     // encodeParams.mfx.CodecLevel = MFX_LEVEL_AVC_5;  // 使用的编码器级别
     encodeParams.mfx.TargetUsage = MFX_TARGETUSAGE_BALANCED; // 速度和质量的平衡度
-
     encodeParams.mfx.RateControlMethod = MFX_RATECONTROL_VBR; // 可变比特率控制算法
     encodeParams.mfx.TargetKbps = 4000; // kbps
     encodeParams.mfx.FrameInfo.FrameRateExtN = 30; // 帧率设置 帧率 = FrameRateExtN / FrameRateExtD
     encodeParams.mfx.FrameInfo.FrameRateExtD = 1;
-    encodeParams.mfx.FrameInfo.FourCC = useHardware ? MFX_FOURCC_NV12 : MFX_FOURCC_I420; 
+    encodeParams.mfx.FrameInfo.FourCC = MFX_FOURCC_I420; 
     encodeParams.mfx.FrameInfo.ChromaFormat = MFX_CHROMAFORMAT_YUV420; // 颜色采样方法
     encodeParams.mfx.FrameInfo.CropW = initImage.cols;  // 原图宽（是ROI，可以比原图小，指定方法{X，Y，W，H})
     encodeParams.mfx.FrameInfo.CropH = initImage.rows; // 原图高
@@ -98,13 +105,31 @@ int main(int argc, char* argv[])
     encodeParams.mfx.FrameInfo.Height = ALIGN16(initImage.rows);   // 目标高 对逐行帧，必须为16的倍数，否则为32的倍数
     encodeParams.IOPattern = MFX_IOPATTERN_IN_SYSTEM_MEMORY; // 函数的输入和输出存储器访问类型
     // 创建vpp参数
-    mfxVideoParam vppParam;
+    mfxVideoParam vppParam = {0};
     vppParam.IOPattern = MFX_IOPATTERN_IN_SYSTEM_MEMORY | MFX_IOPATTERN_OUT_SYSTEM_MEMORY;
-    vppParam.NumExtParam = 0;
     vppParam.vpp.In.FourCC = MFX_FOURCC_RGB4;
+    vppParam.vpp.In.ChromaFormat  = MFX_CHROMAFORMAT_YUV420;
+    vppParam.vpp.In.CropX         = 0;
+    vppParam.vpp.In.CropY         = 0;
+    vppParam.vpp.In.CropW         = initImage.cols;
+    vppParam.vpp.In.CropH         = initImage.rows;
+    vppParam.vpp.In.PicStruct     = MFX_PICSTRUCT_PROGRESSIVE;
+    vppParam.vpp.In.FrameRateExtN = 30;
+    vppParam.vpp.In.FrameRateExtD = 1;
+    vppParam.vpp.In.Width = vppParam.vpp.Out.Width = ALIGN16(initImage.cols);
+    vppParam.vpp.In.Height = vppParam.vpp.Out.Height = ALIGN16(initImage.rows);
+
     vppParam.vpp.Out.FourCC = MFX_FOURCC_I420;
-    vppParam.vpp.In.Width = vppParam.vpp.Out.Width = 1920;
-    vppParam.vpp.In.Height = vppParam.vpp.Out.Height = 1080;
+    vppParam.vpp.Out.ChromaFormat  = MFX_CHROMAFORMAT_YUV420;
+    vppParam.vpp.Out.CropX         = 0;
+    vppParam.vpp.Out.CropY         = 0;
+    vppParam.vpp.Out.CropW         = initImage.cols;
+    vppParam.vpp.Out.CropH         = initImage.rows;
+    vppParam.vpp.Out.PicStruct     = MFX_PICSTRUCT_PROGRESSIVE;
+    vppParam.vpp.Out.FrameRateExtN = 30;
+    vppParam.vpp.Out.FrameRateExtD = 1;
+    vppParam.vpp.Out.Width = vppParam.vpp.Out.Width = ALIGN16(initImage.cols);
+    vppParam.vpp.Out.Height = vppParam.vpp.Out.Height = ALIGN16(initImage.rows);
     // 4.2.创建编码器
     sts = MFXVideoVPP_Init(session, &vppParam);
     std::cout << sts << std::endl;
@@ -213,7 +238,7 @@ void ShowImplementationInfo(mfxLoader loader, mfxU32 implnum) {
     // Loads info about implementation at specified list location
     sts = MFXEnumImplementations(loader, implnum, MFX_IMPLCAPS_IMPLDESCSTRUCTURE, (mfxHDL*)&idesc);
     if (!idesc || (sts != MFX_ERR_NONE)) {
-        printf("count get mfxHDL, MFXEnumImplementations return %d\n", sts);
+        printf("cannot get mfxHDL, MFXEnumImplementations return %d\n", sts);
         return;
     }
 
