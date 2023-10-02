@@ -24,7 +24,17 @@
 
 void ShowImplementationInfo(mfxLoader loader, mfxU32 implnum);
 mfxStatus ReadRawFrame_InternalMem(mfxFrameSurface1 * surface, std::vector<cv::Mat> &vecBGR);
+mfxStatus ReadRawFrame(mfxFrameSurface1* surface, cv::Mat &RGB4);
 void WriteEncodedStream(mfxBitstream & bs, FILE * f);
+void *InitAcceleratorHandle(mfxSession session, int *fd);
+void FreeAcceleratorHandle(void *accelHandle, int fd);
+mfxStatus AllocateExternalSystemMemorySurfacePool(mfxU8 **buf,
+                                                  mfxFrameSurface1 *surfpool,
+                                                  mfxFrameInfo frame_info,
+                                                  mfxU16 surfnum);
+int GetFreeSurfaceIndex(mfxFrameSurface1 *SurfacesPool, mfxU16 nPoolSize); 
+void FreeExternalSystemMemorySurfacePool(mfxU8 *dec_buf, mfxFrameSurface1 *surfpool);   
+                                        
 
 int main(int argc, char* argv[])
 {
@@ -85,6 +95,9 @@ int main(int argc, char* argv[])
 	mfxSession session = NULL;
 	sts = MFXCreateSession(loader, 0, &session);
 	VERIFY(MFX_ERR_NONE == sts, "Cannot create session -- no implementations meet selection criteria");
+    // 创建一下加速器 Convenience function to initialize available accelerator(s)
+    int accel_fd         = 0;
+    void *accelHandle = InitAcceleratorHandle(session, &accel_fd);
 
     // 4.初始化编码器
     // 4.1.设置参数 
@@ -104,6 +117,9 @@ int main(int argc, char* argv[])
     encodeParams.mfx.FrameInfo.Width = ALIGN16(initImage.cols); // 目标宽 必须为16的倍数
     encodeParams.mfx.FrameInfo.Height = ALIGN16(initImage.rows);   // 目标高 对逐行帧，必须为16的倍数，否则为32的倍数
     encodeParams.IOPattern = MFX_IOPATTERN_IN_SYSTEM_MEMORY; // 函数的输入和输出存储器访问类型
+    // fill in missing params
+    sts = MFXVideoENCODE_Query(session, &encodeParams, &encodeParams);
+    VERIFY(MFX_ERR_NONE == sts, "Encode query failed");
     // 创建vpp参数
     mfxVideoParam vppParam = {0};
     vppParam.IOPattern = MFX_IOPATTERN_IN_SYSTEM_MEMORY | MFX_IOPATTERN_OUT_SYSTEM_MEMORY;
@@ -130,25 +146,69 @@ int main(int argc, char* argv[])
     vppParam.vpp.Out.FrameRateExtD = 1;
     vppParam.vpp.Out.Width = vppParam.vpp.Out.Width = ALIGN16(initImage.cols);
     vppParam.vpp.Out.Height = vppParam.vpp.Out.Height = ALIGN16(initImage.rows);
+
     // 4.2.创建编码器
-    sts = MFXVideoVPP_Init(session, &vppParam);
-    std::cout << sts << std::endl;
-    VERIFY(MFX_ERR_NONE == sts, "VPP init failed");
     sts = MFXVideoENCODE_Init(session, &encodeParams);
     std::cout << sts << std::endl;
     VERIFY(MFX_ERR_NONE == sts, "Encode init failed");
     // 创建vpp
-    // 4.3 申请输出比特流，并开辟缓冲区
+    sts = MFXVideoVPP_Init(session, &vppParam);
+    std::cout << sts << std::endl;
+    VERIFY(MFX_ERR_NONE == sts, "VPP init failed");
+    // 4.3 申请内存
+    // 4.3.1 申请VPP内存
+    // 创建IO队列 Query number of required surfaces for VPP
+    mfxFrameAllocRequest VPPRequest[2]  = {};
+    sts = MFXVideoVPP_QueryIOSurf(session, &vppParam, VPPRequest);
+    VERIFY(MFX_ERR_NONE == sts, "Error in QueryIOSurf");
+    // 获取IN和OUT的推荐数量
+    mfxU16 nSurfNumVPPIn  = VPPRequest[0].NumFrameSuggested; // vpp in
+    mfxU16 nSurfNumVPPOut = VPPRequest[1].NumFrameSuggested; // vpp out
+    // 申请In内存大小
+    mfxU8 *vppInBuf         = NULL;
+    mfxFrameSurface1 *vppInSurfacePool = (mfxFrameSurface1 *)calloc(sizeof(mfxFrameSurface1), nSurfNumVPPIn);
+
+    sts = AllocateExternalSystemMemorySurfacePool(&vppInBuf,
+                                                  vppInSurfacePool,
+                                                  vppParam.vpp.In,
+                                                  nSurfNumVPPIn);
+    VERIFY(MFX_ERR_NONE == sts, "Error in external surface allocation for VPP in\n");
+    // 申请Out内存大小
+    mfxU8 *vppOutBuf        = NULL;
+    mfxFrameSurface1 *vppOutSurfacePool = (mfxFrameSurface1 *)calloc(sizeof(mfxFrameSurface1), nSurfNumVPPOut);
+    sts               = AllocateExternalSystemMemorySurfacePool(&vppOutBuf,
+                                                  vppOutSurfacePool,
+                                                  vppParam.vpp.Out,
+                                                  nSurfNumVPPOut);
+    VERIFY(MFX_ERR_NONE == sts, "Error in external surface allocation for VPP out\n");
+    // 4.3.2 申请Encode内存
+    // 申请队列  Query number required surfaces for decoder
+    mfxFrameAllocRequest encRequest = {};
+    sts = MFXVideoENCODE_QueryIOSurf(session, &encodeParams, &encRequest);
+    VERIFY(MFX_ERR_NONE == sts, "QueryIOSurf failed");
+    // 申请输出流大小 Prepare output bitstream
     mfxBitstream bitstream;
     bitstream.MaxLength = BITSTREAM_BUFFER_SIZE;
-    bitstream.Data = (mfxU8*)calloc(bitstream.MaxLength, sizeof(mfxU8));
-    VERIFY(bitstream.Data == NULL, "calloc bitstream failed");
+    bitstream.Data      = (mfxU8 *)malloc(bitstream.MaxLength * sizeof(mfxU8));
+    VERIFY(bitstream.Data != NULL, "calloc bitstream failed");
+    // External (application) allocation of decode surfaces
+    mfxU8 *encOutBuf = NULL;
+    mfxFrameSurface1 *encSurfPool = (mfxFrameSurface1 *)calloc(sizeof(mfxFrameSurface1), encRequest.NumFrameSuggested);
+    sts = AllocateExternalSystemMemorySurfacePool(&encOutBuf,
+                                                  encSurfPool,
+                                                  encodeParams.mfx.FrameInfo,
+                                                  encRequest.NumFrameSuggested);
+    VERIFY(MFX_ERR_NONE == sts, "Error in external surface allocation\n");
 
     // 5.开始编码
     mfxFrameSurface1* encSurfaceIn = NULL; // surface是一块内存区域
     mfxSyncPoint syncp = {};    // 同步指针，用于同步编码的异步处理流程
-    bool keepEncoding = true;
+    bool isStillGoing = true;
     bool isDraining = false; // 是否凑够一帧，没凑够为false，凑够为true
+    int nIndexVPPInSurf  = 0;
+    int nIndexVPPOutSurf = 0;
+    int nIndex = -1;
+    mfxU32 framenum = 0;
     // 5.1.输出文件
 #ifdef _MSC_VER
     FILE* sink;
@@ -158,74 +218,109 @@ int main(int argc, char* argv[])
 #endif 
     VERIFY(sink, "Could not create output file");
     // 5.2.开始循环
-    while (keepEncoding)
-    {
+    printf("Encode start!");
+    while (isStillGoing) {
         cv::Mat image;
-        std::vector<cv::Mat> vecBGR;
         cap >> image;
+        cv::cvtColor(image, image, cv::COLOR_BGR2BGRA);
         // Load a new frame if not draining
         if (isDraining == false) {
-            sts = MFXMemory_GetSurfaceForEncode(session, &encSurfaceIn);
-            VERIFY(MFX_ERR_NONE == sts, "Could not get encode surface");
-
-            if (encSurfaceIn == NULL) printf("enSurfaceIn is NULL");
-
-            cv::split(image, vecBGR);
-            sts = ReadRawFrame_InternalMem(encSurfaceIn, vecBGR);
+            // 先把图读到vpp里，转I420
+            nIndexVPPInSurf = GetFreeSurfaceIndex(vppInSurfacePool, nSurfNumVPPIn); // Find free input frame surface
+            // nIndex       = GetFreeSurfaceIndex(encSurfPool, encRequest.NumFrameSuggested);
+            // encSurfaceIn = &encSurfPool[nIndex];
+            sts = ReadRawFrame(&vppInSurfacePool[nIndexVPPInSurf], image);
+            // sts = ReadRawFrame(encSurfaceIn, image);
             if (sts != MFX_ERR_NONE)
                 isDraining = true;
         }
+        // 先取得一个vpp out surface，存放vpp输出结果
+        nIndexVPPOutSurf = GetFreeSurfaceIndex(vppOutSurfacePool,
+                                               nSurfNumVPPOut); // Find free output frame surface
+        encSurfaceIn = &vppOutSurfacePool[nIndexVPPOutSurf];
+        sts = MFXVideoVPP_RunFrameVPPAsync( session,
+                                            (isDraining == true) ? NULL : &vppInSurfacePool[nIndexVPPInSurf],
+                                            encSurfaceIn, //&vppOutSurfacePool[nIndexVPPOutSurf],
+                                            NULL,
+                                            &syncp);
 
         sts = MFXVideoENCODE_EncodeFrameAsync(session,
-            NULL,
-            (isDraining == true) ? NULL : encSurfaceIn,
-            &bitstream,
-            &syncp);
+                                              NULL,
+                                              (isDraining == true) ? NULL : encSurfaceIn,
+                                              &bitstream,
+                                              &syncp);
 
-        if (!isDraining) {
-            mfxStatus sts_r = encSurfaceIn->FrameInterface->Release(encSurfaceIn);
-            VERIFY(MFX_ERR_NONE == sts_r, "mfxFrameSurfaceInterface->Release failed");
-        }
         switch (sts) {
-        case MFX_ERR_NONE:
-            // MFX_ERR_NONE and syncp indicate output is available
-            if (syncp) {
-                // Encode output is not available on CPU until sync operation
-                // completes
-                sts = MFXVideoCORE_SyncOperation(session, syncp, 100);
-                VERIFY(MFX_ERR_NONE == sts, "MFXVideoCORE_SyncOperation error");
+            case MFX_ERR_NONE:
+                // MFX_ERR_NONE and syncp indicate output is available
+                if (syncp) {
+                    printf("hear!");
+                    // Encode output is not available on CPU until sync operation completes
+                    sts = MFXVideoCORE_SyncOperation(session, syncp, 100 * 1000);
+                    VERIFY(MFX_ERR_NONE == sts, "MFXVideoCORE_SyncOperation error");
 
-                WriteEncodedStream(bitstream, sink);
-            }
-            break;
-        case MFX_ERR_NOT_ENOUGH_BUFFER:
-            // This example deliberatly uses a large output buffer with immediate
-            // write to disk for simplicity. Handle when frame size exceeds
-            // available buffer here
-            break;
-        case MFX_ERR_MORE_DATA:
-            // The function requires more data to generate any output
-            if (isDraining == true)
-                keepEncoding = false;
-            break;
-        case MFX_ERR_DEVICE_LOST:
-            // For non-CPU implementations,
-            // Cleanup if device is lost
-            break;
-        case MFX_WRN_DEVICE_BUSY:
-            // For non-CPU implementations,
-            // Wait a few milliseconds then try again
-            break;
-        default:
-            printf("unknown status %d\n", sts);
-            keepEncoding = false;
-            break;
+                    WriteEncodedStream(bitstream, sink);
+                    framenum++;
+                }
+                break;
+            case MFX_ERR_NOT_ENOUGH_BUFFER:
+                // This example deliberatly uses a large output buffer with immediate write to disk
+                // for simplicity.
+                // Handle when frame size exceeds available buffer here
+                break;
+            case MFX_ERR_MORE_DATA:
+                // The function requires more data to generate any output
+                if (isDraining)
+                    isStillGoing = false;
+                break;
+            case MFX_ERR_DEVICE_LOST:
+                // For non-CPU implementations,
+                // Cleanup if device is lost
+                break;
+            case MFX_WRN_DEVICE_BUSY:
+                // For non-CPU implementations,
+                // Wait a few milliseconds then try again
+                break;
+            default:
+                printf("unknown status %d\n", sts);
+                isStillGoing = false;
+                break;
         }
     }
-    if (session)
+    
+    if (session) {
+        MFXVideoENCODE_Close(session);
+        MFXVideoVPP_Close(session);
         MFXClose(session);
+    }
+
+    if (vppInBuf || vppInSurfacePool) {
+        FreeExternalSystemMemorySurfacePool(vppInBuf, vppInSurfacePool);
+    }
+
+    if (vppOutBuf || vppOutSurfacePool) {
+        FreeExternalSystemMemorySurfacePool(vppOutBuf, vppOutSurfacePool);
+    }
+
+    if (bitstream.Data)
+        free(bitstream.Data);
+
+    if (encSurfPool || encOutBuf) {
+        FreeExternalSystemMemorySurfacePool(encOutBuf, encSurfPool);
+    }
+
+    if(sink)
+        fclose(sink);
+
+    FreeAcceleratorHandle(accelHandle, accel_fd);
+    accelHandle = NULL;
+    accel_fd    = 0;
+
     if (loader)
         MFXUnload(loader);
+    if (isFailed) {
+        return -1;
+    }
     return 0;
 }
 
@@ -291,6 +386,33 @@ void ShowImplementationInfo(mfxLoader loader, mfxU32 implnum) {
 }
 
 // 读一帧
+mfxStatus ReadRawFrame(mfxFrameSurface1* surface, cv::Mat &RGB4) {
+    mfxU16 w, h, i, pitch;
+    size_t bytes_read;
+    mfxU8* ptr;
+    mfxFrameInfo* info = &surface->Info;
+    mfxFrameData* data = &surface->Data;
+ 
+    w = info->Width;
+    h = info->Height;
+    switch (info->FourCC) {
+    case MFX_FOURCC_RGB4:
+        pitch = data->Pitch;
+        for (i = 0; i < h; i++) {
+            memcpy(data->B + i * pitch, RGB4.data + i * RGB4.step, 1 * pitch);
+            // bytes_read = memcpy(data->B + i * pitch, 1, pitch, f);
+            // if (pitch != bytes_read)
+            //     return MFX_ERR_MORE_DATA;
+        }
+        break;
+    default:
+        printf("Unsupported FourCC code, skip LoadRawFrame\n");
+        break;
+    }
+
+    return MFX_ERR_NONE;
+}
+// 读一帧
 mfxStatus ReadRawFrame(mfxFrameSurface1* surface, std::vector<cv::Mat> &vecBGR) {
     mfxU16 w, h, i, pitch;
     size_t bytes_read;
@@ -349,3 +471,132 @@ void WriteEncodedStream(mfxBitstream& bs, FILE* f) {
     bs.DataLength = 0;
     return;
 }
+
+
+void *InitAcceleratorHandle(mfxSession session, int *fd) {
+    mfxIMPL impl;
+    mfxStatus sts = MFXQueryIMPL(session, &impl);
+    if (sts != MFX_ERR_NONE)
+        return NULL;
+
+#ifdef LIBVA_SUPPORT
+    if ((impl & MFX_IMPL_VIA_VAAPI) == MFX_IMPL_VIA_VAAPI) {
+        if (!fd)
+            return NULL;
+        VADisplay va_dpy = NULL;
+        // initialize VAAPI context and set session handle (req in Linux)
+        *fd = open("/dev/dri/renderD128", O_RDWR);
+        if (*fd >= 0) {
+            va_dpy = vaGetDisplayDRM(*fd);
+            if (va_dpy) {
+                int major_version = 0, minor_version = 0;
+                if (VA_STATUS_SUCCESS == vaInitialize(va_dpy, &major_version, &minor_version)) {
+                    MFXVideoCORE_SetHandle(session,
+                                           static_cast<mfxHandleType>(MFX_HANDLE_VA_DISPLAY),
+                                           va_dpy);
+                }
+            }
+        }
+        return va_dpy;
+    }
+#endif
+
+    return NULL;
+}
+
+void FreeAcceleratorHandle(void *accelHandle, int fd) {
+#ifdef LIBVA_SUPPORT
+    if (accelHandle) {
+        vaTerminate((VADisplay)accelHandle);
+    }
+    if (fd) {
+        close(fd);
+    }
+#endif
+}
+
+void FreeExternalSystemMemorySurfacePool(mfxU8 *dec_buf, mfxFrameSurface1 *surfpool) {
+    if (dec_buf)
+        free(dec_buf);
+
+    if (surfpool)
+        free(surfpool);
+}
+
+mfxU32 GetSurfaceSize(mfxU32 FourCC, mfxU32 width, mfxU32 height) {
+    mfxU32 nbytes = 0;
+
+    switch (FourCC) {
+        case MFX_FOURCC_I420:
+        case MFX_FOURCC_NV12:
+            nbytes = width * height + (width >> 1) * (height >> 1) + (width >> 1) * (height >> 1);
+            break;
+        case MFX_FOURCC_I010:
+        case MFX_FOURCC_P010:
+            nbytes = width * height + (width >> 1) * (height >> 1) + (width >> 1) * (height >> 1);
+            nbytes *= 2;
+            break;
+        case MFX_FOURCC_RGB4:
+            nbytes = width * height * 4;
+            break;
+        default:
+            break;
+    }
+
+    return nbytes;
+}
+
+mfxStatus AllocateExternalSystemMemorySurfacePool(mfxU8 **buf,
+                                                  mfxFrameSurface1 *surfpool,
+                                                  mfxFrameInfo frame_info,
+                                                  mfxU16 surfnum) {
+    // initialize surface pool (I420, RGB4 format)
+    mfxU32 surfaceSize = GetSurfaceSize(frame_info.FourCC, frame_info.Width, frame_info.Height);
+    if (!surfaceSize)
+        return MFX_ERR_MEMORY_ALLOC;
+
+    size_t framePoolBufSize = static_cast<size_t>(surfaceSize) * surfnum;
+    *buf                    = reinterpret_cast<mfxU8 *>(calloc(framePoolBufSize, 1));
+
+    mfxU16 surfW;
+    mfxU16 surfH = frame_info.Height;
+
+    if (frame_info.FourCC == MFX_FOURCC_RGB4) {
+        surfW = frame_info.Width * 4;
+
+        for (mfxU32 i = 0; i < surfnum; i++) {
+            surfpool[i]            = { 0 };
+            surfpool[i].Info       = frame_info;
+            size_t buf_offset      = static_cast<size_t>(i) * surfaceSize;
+            surfpool[i].Data.B     = *buf + buf_offset;
+            surfpool[i].Data.G     = surfpool[i].Data.B + 1;
+            surfpool[i].Data.R     = surfpool[i].Data.B + 2;
+            surfpool[i].Data.A     = surfpool[i].Data.B + 3;
+            surfpool[i].Data.Pitch = surfW;
+        }
+    }
+    else {
+        surfW = (frame_info.FourCC == MFX_FOURCC_P010) ? frame_info.Width * 2 : frame_info.Width;
+
+        for (mfxU32 i = 0; i < surfnum; i++) {
+            surfpool[i]            = { 0 };
+            surfpool[i].Info       = frame_info;
+            size_t buf_offset      = static_cast<size_t>(i) * surfaceSize;
+            surfpool[i].Data.Y     = *buf + buf_offset;
+            surfpool[i].Data.U     = *buf + buf_offset + (surfW * surfH);
+            surfpool[i].Data.V     = surfpool[i].Data.U + ((surfW / 2) * (surfH / 2));
+            surfpool[i].Data.Pitch = surfW;
+        }
+    }
+
+    return MFX_ERR_NONE;
+}
+
+int GetFreeSurfaceIndex(mfxFrameSurface1 *SurfacesPool, mfxU16 nPoolSize) {
+    for (mfxU16 i = 0; i < nPoolSize; i++) {
+        if (0 == SurfacesPool[i].Data.Locked)
+            return i;
+    }
+    return MFX_ERR_NOT_FOUND;
+}
+

@@ -627,4 +627,5 @@ mfxStatus WriteRawFrame_InternalMem(mfxFrameSurface1 *surface, FILE *f) {
 }
 #endif
 
+
 #endif // EXAMPLES_UTIL_H_
