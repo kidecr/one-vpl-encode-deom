@@ -44,7 +44,8 @@ VplEncodeModule::VplEncodeModule(std::string file_path, int imageWight, int imag
 	codecValue.Data.U32 = MFX_CODEC_AVC;		// 设置CODEC类型：MFX_CODEC_*，具体可以看CodecFormatFourCC
 	sts = MFXSetConfigFilterProperty(codecConfig, (mfxU8*)"mfxImplDescription.mfxEncoderDescription.encoder.CodecID", codecValue);	// 设置参数
 	VERIFY(MFX_ERR_NONE == sts, "MFXSetConfigFilterProperty failed for encoder CodecID");
-	// 2.3.设置vpp Implementation must provide VPP scaling
+	
+    // 2.3.设置vpp Implementation must provide VPP scaling
     mfxConfig vppCodecConfig = MFXCreateConfig(loader);
     VERIFY(NULL != vppCodecConfig, "MFXCreateConfig failed");
     mfxVariant vppCodecValue = {0};
@@ -128,10 +129,6 @@ VplEncodeModule::VplEncodeModule(std::string file_path, int imageWight, int imag
     //                                               encRequest.NumFrameSuggested);
     // VERIFY(MFX_ERR_NONE == sts, "Error in external surface allocation\n");
     // 6.创建并打开输出文件
-    VERIFY(access(file_path.c_str(), F_OK) == 0, "output file is not exist");
-    struct stat s;
-    stat(file_path.c_str(), &s);
-    VERIFY(S_ISREG(s.st_mode), "output file's type is not FILE");
     sink = fopen(file_path.c_str(), "wb");
     VERIFY(sink != NULL, "open output file failed");
 }
