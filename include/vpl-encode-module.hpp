@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <mutex>
 
 #include <vpl/mfx.h>
 #include <opencv2/opencv.hpp>
@@ -32,7 +33,7 @@ public:
 
 private:
     int sts = 0; // MFX_ERR_NONE=0, 其他报错为负数 https://spec.oneapi.io/versions/latest/elements/oneVPL/source/API_ref/VPL_enums.html?highlight=mfx_err_none#mfxstatus
-    bool useHardware = false;
+    bool useHardware = true;
 
     mfxLoader loader = NULL; // loader handle
     mfxSession session = NULL; // 任务
@@ -44,6 +45,9 @@ private:
     mfxU8 *vppOutBuf = NULL;            // vpp 输出内存，用于存储图像，兼用于encode输入
     mfxFrameSurface1 *vppInSurfacePool = NULL;  // vpp输入内存池，用于存储SurfacePool信息
     mfxFrameSurface1 *vppOutSurfacePool = NULL; // vpp输出内存池，用于存储SurfacePool信息，兼用于encode输入
+    mfxU16 nSurfNumEncIn = 0;           // Encode 推荐输入surface loop大小
+    mfxU8 *encOutBuf = NULL;            // Encode 输入内存，用于存储图像
+    mfxFrameSurface1 *encSurfPool = NULL;       // Encode输入内存池，用于存储SurfacePool信息
     mfxBitstream bitstream;             // Encode输出bit流
     mfxSyncPoint syncp = {};            // 同步指针，用于同步编码的异步处理流程
     int accel_fd = 0;                   // 加速器 fd
@@ -52,7 +56,8 @@ private:
     bool isStillGoing = true;   // 标识是否继续编码
     bool noImage = false;       // 是否还有未编码的图像
     int nIndexVPPInSurf  = -1;  // 当前使用的surface在输入loop中的index
-    int nIndexVPPOutSurf = -1;  // 当前使用的surface在输出loop中的index，兼为encode输入loop索引
+    int nIndexVPPOutSurf = -1;  // 当前使用的surface在输出loop中的index，当使用VPP时兼为encode输入loop索引
+    int nIndexEncInSurf = -1;   // 当前使用的surface在输入loop中的index，当使用VPP时无用
     FILE* sink = NULL;          // 输出文件
 
     std::queue<cv::Mat> imageQueue; // 输入图像队列
@@ -152,6 +157,9 @@ private:
      * @return int id，如果没找到，返回MFX_ERR_NOT_FOUND
      */
     int GetFreeSurfaceIndex(mfxFrameSurface1 *SurfacesPool, mfxU16 nPoolSize);
+
+    void PrintParam(mfxVideoParam param);
+    mfxU16 FourCCToChromaFormat(mfxU32 fourCC);
 };
 
 

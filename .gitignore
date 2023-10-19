@@ -1,4 +1,8 @@
 .vscode
 build
-out.h265
 vpl
+*.h265
+*.yuv
+*.h264
+*.out
+*.swp

@@ -5,6 +5,8 @@
 #include <thread>
 #include <queue>
 
+// #define USE_VPP
+
 // 错误检查
 #define VERIFY(x, y)       \
     if (!(x)) {            \
@@ -38,21 +40,39 @@ VplEncodeModule::VplEncodeModule(std::string file_path, int imageWight, int imag
 
 	// 2.2.设置编码器
 	mfxConfig codecConfig = MFXCreateConfig(loader);
-	VERIFY(NULL != implConfig, "MFXCreateConfig failed");
+	VERIFY(NULL != codecConfig, "MFXCreateConfig failed");
 	mfxVariant codecValue = {0};
 	codecValue.Type = MFX_VARIANT_TYPE_U32;
-	codecValue.Data.U32 = MFX_CODEC_AVC;		// 设置CODEC类型：MFX_CODEC_*，具体可以看CodecFormatFourCC
+	codecValue.Data.U32 = MFX_CODEC_HEVC;		// 设置CODEC类型：MFX_CODEC_*，具体可以看CodecFormatFourCC
 	sts = MFXSetConfigFilterProperty(codecConfig, (mfxU8*)"mfxImplDescription.mfxEncoderDescription.encoder.CodecID", codecValue);	// 设置参数
 	VERIFY(MFX_ERR_NONE == sts, "MFXSetConfigFilterProperty failed for encoder CodecID");
+
+    mfxConfig memHandleConfig = MFXCreateConfig(loader);
+	VERIFY(NULL != memHandleConfig, "MFXCreateConfig failed");
+	mfxVariant memHandleValue = {0};
+	memHandleValue.Type = MFX_VARIANT_TYPE_U32;
+	memHandleValue.Data.U32 = MFX_RESOURCE_SYSTEM_SURFACE;		// 设置MemHandleType类型：MFX_RESOURCE*，具体可以看mfxResourceType
+	sts = MFXSetConfigFilterProperty(memHandleConfig, (mfxU8*)"mfxImplDescription.mfxEncoderDescription.encoder.encprofile.Profile.encmemdesc.MemHandleType", memHandleValue);	// 设置参数
+	VERIFY(MFX_ERR_NONE == sts, "MFXSetConfigFilterProperty failed for encoder CodecID");
+
+    // mfxConfig codecConfig = MFXCreateConfig(loader);
+	// VERIFY(NULL != implConfig, "MFXCreateConfig failed");
+	// mfxVariant codecValue = {0};
+	// codecValue.Type = MFX_VARIANT_TYPE_U32;
+	// codecValue.Data.U32 = MFX_RESOURCE_SYSTEM_SURFACE;		// 设置MemHandleType类型：MFX_RESOURCE*，具体可以看mfxResourceType
+	// sts = MFXSetConfigFilterProperty(codecConfig, (mfxU8*)"mfxImplDescription.mfxEncoderDescription.encoder.encprofile.Profile.encmemdesc.ColorFormats", codecValue);	// 设置参数
+	// VERIFY(MFX_ERR_NONE == sts, "MFXSetConfigFilterProperty failed for encoder CodecID");
 	
+#ifdef USE_VPP
     // 2.3.设置vpp Implementation must provide VPP scaling
     mfxConfig vppCodecConfig = MFXCreateConfig(loader);
     VERIFY(NULL != vppCodecConfig, "MFXCreateConfig failed");
     mfxVariant vppCodecValue = {0};
     vppCodecValue.Type     = MFX_VARIANT_TYPE_U32;
-    vppCodecValue.Data.U32 = MFX_EXTBUFF_VPP_SCALING;
+    vppCodecValue.Data.U32 = MFX_EXTBUFF_VPP_COLOR_CONVERSION;//MFX_EXTBUFF_VPP_SCALING; // 含义查这里 https://spec.oneapi.io/versions/latest/elements/oneVPL/source/programming_guide/VPL_prg_session.html?highlight=mfx_extbuff_vpp_scaling#how-to-search-for-the-available-vpp-filter-implementation
     sts = MFXSetConfigFilterProperty(vppCodecConfig, (mfxU8 *)"mfxImplDescription.mfxVPPDescription.filter.FilterFourCC", vppCodecValue);
     VERIFY(MFX_ERR_NONE == sts, "MFXSetConfigFilterProperty failed");
+#endif // USE_VPP
     // 2.4.设置API版本(可以不用)，关于vpl是如何搜索API版本的，https://spec.oneapi.io/versions/latest/elements/oneVPL/source/programming_guide/VPL_prg_session.html
 	//mfxConfig apiVersionConfig = MFXCreateConfig(loader);
 	//VERIFY(NULL != apiVersionConfig, "MFXCreateConfig failed")
@@ -68,26 +88,34 @@ VplEncodeModule::VplEncodeModule(std::string file_path, int imageWight, int imag
     // 一个loader可以创建多个session，一个session可以具有多条处理流，一个程序可以创建多个loader
     // 多loader和多处理流 https://spec.oneapi.io/versions/latest/elements/oneVPL/source/programming_guide/VPL_prg_session.html#examples-of-dispatcher-s-usage
     // 多session https://spec.oneapi.io/versions/latest/elements/oneVPL/source/programming_guide/VPL_prg_session.html#multiple-sessions
-	sts = MFXCreateSession(loader, 0, &session);
+    sts = MFXCreateSession(loader, 0, &session);
 	VERIFY(MFX_ERR_NONE == sts, "Cannot create session -- no implementations meet selection criteria");
     // 3.1 创建一下加速器 Convenience function to initialize available accelerator(s)
     accelHandle = InitAcceleratorHandle(session, &accel_fd);
-
     // 4.初始化编码器和VPP
     // 4.1.设置参数 
+    // mfxVideoParam param{0};
+    // encodeParam = param;
     encodeParam = SetEncodeParam(imageWight, imageHeight);
     vppParam = SetVPPParam(imageWight, imageHeight);
     // 4.2.填补和矫正不和里参数
+    // PrintParam(encodeParam);
     sts = MFXVideoENCODE_Query(session, &encodeParam, &encodeParam);
+    PrintParam(encodeParam);
+    printf("encode sts %d\n", sts);
     VERIFY(MFX_ERR_NONE == sts, "Encode query failed");
     // 4.3.创建编码器
     sts = MFXVideoENCODE_Init(session, &encodeParam);
+    printf("encode sts %d\n", sts);
     VERIFY(MFX_ERR_NONE == sts, "Encode init failed");
+#ifdef USE_VPP
     // 4.4.创建vpp
     sts = MFXVideoVPP_Init(session, &vppParam);
     VERIFY(MFX_ERR_NONE == sts, "VPP init failed");
+#endif // USE_VPP
 
     // 5.申请内存
+#ifdef USE_VPP
     // 5.1.申请VPP内存
     // 5.1.1.创建IO队列 Query number of required surfaces for VPP
     mfxFrameAllocRequest VPPRequest[2]  = {};
@@ -111,23 +139,28 @@ VplEncodeModule::VplEncodeModule(std::string file_path, int imageWight, int imag
                                                   vppParam.vpp.Out,
                                                   nSurfNumVPPOut);
     VERIFY(MFX_ERR_NONE == sts, "Error in external surface allocation for VPP out\n");
+#endif // USE_VPP
+
     // 5.2.申请Encode内存
     // 5.2.1.申请队列  Query number required surfaces for decoder
     mfxFrameAllocRequest encRequest = {0};
     sts = MFXVideoENCODE_QueryIOSurf(session, &encodeParam, &encRequest);
     VERIFY(MFX_ERR_NONE == sts, "QueryIOSurf failed");
+    nSurfNumEncIn = encRequest.NumFrameSuggested;
     // 5.2.2.申请输出流大小 Prepare output bitstream
     bitstream.MaxLength = BITSTREAM_BUFFER_SIZE;
     bitstream.Data      = (mfxU8 *)malloc(bitstream.MaxLength * sizeof(mfxU8));
     VERIFY(bitstream.Data != NULL, "calloc bitstream failed");
     // // 5.2.3.申请输入surface pool，（用不上了，直接用VPP的输出代替）External (application) allocation of decode surfaces
-    // mfxU8 *encOutBuf = NULL;
-    // mfxFrameSurface1 *encSurfPool = (mfxFrameSurface1 *)calloc(sizeof(mfxFrameSurface1), encRequest.NumFrameSuggested);
-    // sts = AllocateExternalSystemMemorySurfacePool(&encOutBuf,
-    //                                               encSurfPool,
-    //                                               encodeParam.mfx.FrameInfo,
-    //                                               encRequest.NumFrameSuggested);
-    // VERIFY(MFX_ERR_NONE == sts, "Error in external surface allocation\n");
+#ifndef USE_VPP
+    encSurfPool = (mfxFrameSurface1 *)calloc(sizeof(mfxFrameSurface1), nSurfNumEncIn);
+    sts = AllocateExternalSystemMemorySurfacePool(&encOutBuf,
+                                                  encSurfPool,
+                                                  encodeParam.mfx.FrameInfo,
+                                                  nSurfNumEncIn);
+    VERIFY(MFX_ERR_NONE == sts, "Error in external surface allocation\n");
+#endif // USE_VPP
+
     // 6.创建并打开输出文件
     sink = fopen(file_path.c_str(), "wb");
     VERIFY(sink != NULL, "open output file failed");
@@ -135,21 +168,56 @@ VplEncodeModule::VplEncodeModule(std::string file_path, int imageWight, int imag
 
 mfxVideoParam VplEncodeModule::SetEncodeParam(int w, int h)
 {
+    // 参数约束 https://spec.oneapi.io/versions/latest/elements/oneVPL/source/appendix/VPL_apnds_a.html#encode-constraint-table
+    // mfxVideoParam encodeParam = {0}; // 参数解释 https://spec.oneapi.io/versions/latest/elements/oneVPL/source/API_ref/VPL_structs_cross_component.html?highlight=mfxvideoparam#mfxvideoparam
+    // encodeParam.mfx.CodecId = MFX_CODEC_HEVC;  // 编码器
+    // // encodeParam.mfx.CodecProfile = MFX_PROFILE_AVC_CONSTRAINED_BASELINE;   // 使用默认配置参数
+    // // encodeParam.mfx.CodecLevel = MFX_LEVEL_AVC_5;  // 使用的编码器级别
+    // encodeParam.mfx.TargetUsage = MFX_TARGETUSAGE_BALANCED; // 速度和质量的平衡度
+    // encodeParam.mfx.RateControlMethod = MFX_RATECONTROL_VBR; // 可变比特率控制算法
+    // encodeParam.mfx.TargetKbps = 4000; // kbps
+    // encodeParam.mfx.FrameInfo.FrameRateExtN = 30; // 帧率设置 帧率 = FrameRateExtN / FrameRateExtD
+    // encodeParam.mfx.FrameInfo.FrameRateExtD = 1;
+    // encodeParam.mfx.FrameInfo.FourCC = MFX_FOURCC_I420; 
+    // encodeParam.mfx.FrameInfo.ChromaFormat = FourCCToChromaFormat(encodeParam.mfx.FrameInfo.FourCC); // 颜色采样方法
+    // encodeParam.mfx.FrameInfo.CropW = w;  // 原图宽（是ROI，可以比原图小，指定方法{X，Y，W，H})
+    // encodeParam.mfx.FrameInfo.CropH = h; // 原图高
+    // encodeParam.mfx.FrameInfo.Width = ALIGN16(w); // 目标宽 必须为16的倍数
+    // encodeParam.mfx.FrameInfo.Height = ALIGN16(h);   // 目标高 对逐行帧，必须为16的倍数，否则为32的倍数
+    // encodeParam.IOPattern = MFX_IOPATTERN_IN_SYSTEM_MEMORY; // 函数的输入和输出存储器访问类型
+
     mfxVideoParam encodeParam = {0}; // 参数解释 https://spec.oneapi.io/versions/latest/elements/oneVPL/source/API_ref/VPL_structs_cross_component.html?highlight=mfxvideoparam#mfxvideoparam
     encodeParam.mfx.CodecId = MFX_CODEC_HEVC;  // 编码器
-    // encodeParam.mfx.CodecProfile = MFX_PROFILE_AVC_CONSTRAINED_BASELINE;   // 使用默认配置参数
-    // encodeParam.mfx.CodecLevel = MFX_LEVEL_AVC_5;  // 使用的编码器级别
+    encodeParam.mfx.CodecProfile = MFX_PROFILE_HEVC_MAIN;   // 使用默认配置参数
+    encodeParam.mfx.CodecLevel = MFX_LEVEL_HEVC_4;  // 使用的编码器级别
     encodeParam.mfx.TargetUsage = MFX_TARGETUSAGE_BALANCED; // 速度和质量的平衡度
-    encodeParam.mfx.RateControlMethod = MFX_RATECONTROL_VBR; // 可变比特率控制算法
-    encodeParam.mfx.TargetKbps = 4000; // kbps
-    encodeParam.mfx.FrameInfo.FrameRateExtN = 30; // 帧率设置 帧率 = FrameRateExtN / FrameRateExtD
+    encodeParam.mfx.RateControlMethod = MFX_RATECONTROL_VBR; //MFX_RATECONTROL_CQP; // 可变比特率控制算法
+    encodeParam.mfx.TargetKbps = 4000; //4000; // kbps
+    encodeParam.mfx.MaxKbps = 0; //30000;
+    encodeParam.mfx.BufferSizeInKB = 20000;
+    encodeParam.mfx.GopPicSize = 3;
+    encodeParam.mfx.GopRefDist = 1;
+    encodeParam.mfx.GopOptFlag = MFX_GOP_CLOSED;
+    encodeParam.mfx.IdrInterval= 0;
+    encodeParam.mfx.ICQQuality = 1; // 使用MFX_RATECONTROL_ICQ算法时有用,范围1-51,1为最佳
+    encodeParam.mfx.InitialDelayInKB = 5;
+    encodeParam.mfx.Accuracy = 5;
+    encodeParam.mfx.FrameInfo.FrameRateExtN = 10; // 帧率设置 帧率 = FrameRateExtN / FrameRateExtD
     encodeParam.mfx.FrameInfo.FrameRateExtD = 1;
-    encodeParam.mfx.FrameInfo.FourCC = MFX_FOURCC_I420; 
-    encodeParam.mfx.FrameInfo.ChromaFormat = MFX_CHROMAFORMAT_YUV420; // 颜色采样方法
+    encodeParam.mfx.FrameInfo.FourCC = MFX_FOURCC_RGB4; //MFX_FOURCC_I010; //MFX_FOURCC_P010; //MFX_FOURCC_NV16;//MFX_FOURCC_I422; //MFX_FOURCC_I420; //MFX_FOURCC_IYUV; //MFX_FOURCC_NV12; //MFX_FOURCC_RGB4; 
+    encodeParam.mfx.FrameInfo.ChromaFormat = FourCCToChromaFormat(encodeParam.mfx.FrameInfo.FourCC); // 颜色采样方法
+    encodeParam.mfx.FrameInfo.CropX = 0;
+    encodeParam.mfx.FrameInfo.CropY = 0;
     encodeParam.mfx.FrameInfo.CropW = w;  // 原图宽（是ROI，可以比原图小，指定方法{X，Y，W，H})
     encodeParam.mfx.FrameInfo.CropH = h; // 原图高
-    encodeParam.mfx.FrameInfo.Width = ALIGN16(w); // 目标宽 必须为16的倍数
-    encodeParam.mfx.FrameInfo.Height = ALIGN16(h);   // 目标高 对逐行帧，必须为16的倍数，否则为32的倍数
+    encodeParam.mfx.FrameInfo.Width = ALIGN32(w); // 目标宽 必须为16的倍数
+    encodeParam.mfx.FrameInfo.Height = ALIGN32(h);   // 目标高 对逐行帧，必须为16的倍数，否则为32的倍数
+    encodeParam.mfx.FrameInfo.PicStruct = MFX_PICSTRUCT_PROGRESSIVE; // 像素格式 MFX_PICSTRUCT_PROGRESSIVE逐行扫描
+    encodeParam.mfx.FrameInfo.AspectRatioW = 0;
+    encodeParam.mfx.FrameInfo.AspectRatioH = 0;
+    // encodeParam.mfx.FrameInfo.BitDepthLuma = 8; // 使用多少位表示亮度
+    // encodeParam.mfx.FrameInfo.BitDepthChroma = 24; // 使用多少位表示色度
+    encodeParam.AsyncDepth = 3;
     encodeParam.IOPattern = MFX_IOPATTERN_IN_SYSTEM_MEMORY; // 函数的输入和输出存储器访问类型
 
     return encodeParam;
@@ -160,7 +228,7 @@ mfxVideoParam VplEncodeModule::SetVPPParam(int w, int h)
     mfxVideoParam vppParam = {0}; // 必须用0初始化，防止有些参数出现未知值
     vppParam.IOPattern = MFX_IOPATTERN_IN_SYSTEM_MEMORY | MFX_IOPATTERN_OUT_SYSTEM_MEMORY;
     vppParam.vpp.In.FourCC = MFX_FOURCC_RGB4;
-    vppParam.vpp.In.ChromaFormat  = MFX_CHROMAFORMAT_YUV420;
+    vppParam.vpp.In.ChromaFormat  = FourCCToChromaFormat(vppParam.vpp.In.FourCC);
     vppParam.vpp.In.CropX         = 0;
     vppParam.vpp.In.CropY         = 0;
     vppParam.vpp.In.CropW         = w;
@@ -172,7 +240,7 @@ mfxVideoParam VplEncodeModule::SetVPPParam(int w, int h)
     vppParam.vpp.In.Height = vppParam.vpp.Out.Height = ALIGN16(h);
 
     vppParam.vpp.Out.FourCC = MFX_FOURCC_I420;
-    vppParam.vpp.Out.ChromaFormat  = MFX_CHROMAFORMAT_YUV420;
+    vppParam.vpp.Out.ChromaFormat  = FourCCToChromaFormat(vppParam.vpp.Out.FourCC);
     vppParam.vpp.Out.CropX         = 0;
     vppParam.vpp.Out.CropY         = 0;
     vppParam.vpp.Out.CropW         = w;
@@ -184,6 +252,74 @@ mfxVideoParam VplEncodeModule::SetVPPParam(int w, int h)
     vppParam.vpp.Out.Height = vppParam.vpp.Out.Height = ALIGN16(h);
 
     return vppParam;
+}
+
+void VplEncodeModule::PrintParam(mfxVideoParam param)
+{
+    printf("mfxVideoParam.AllocId: %d\n", param.AllocId);
+    printf("mfxVideoParam.AsyncDepth: %d\n", param.AsyncDepth);
+    printf("mfxVideoParam.Protected: %d\n", param.Protected);
+    printf("mfxVideoParam.NumExtParam: %d\n", param.NumExtParam);
+    printf("mfxVideoParam.IOPattern: %d\n\n", param.IOPattern);
+    
+    printf("mfxVideoParam.mfx.CodecId: %d\n", param.mfx.CodecId);
+    printf("mfxVideoParam.mfx.CodecProfile: %d\n", param.mfx.CodecProfile);
+    printf("mfxVideoParam.mfx.CodecLevel: %d\n", param.mfx.CodecLevel);
+    printf("mfxVideoParam.mfx.TargetUsage: %d\n", param.mfx.TargetUsage);
+    printf("mfxVideoParam.mfx.RateControlMethod: %d\n", param.mfx.RateControlMethod);
+    printf("mfxVideoParam.mfx.TargetKbps: %d\n\n", param.mfx.TargetKbps);
+    
+    printf("mfxVideoParam.mfx.LowPower: %d\n", param.mfx.LowPower);
+    printf("mfxVideoParam.mfx.BRCParamMultiplier: %d\n", param.mfx.BRCParamMultiplier);
+    printf("mfxVideoParam.mfx.GopPicSize: %d\n", param.mfx.GopPicSize);
+    printf("mfxVideoParam.mfx.GopRefDist: %d\n", param.mfx.GopRefDist);
+    printf("mfxVideoParam.mfx.GopOptFlag: %d\n", param.mfx.GopOptFlag);
+    printf("mfxVideoParam.mfx.IdrInterval: %d\n", param.mfx.IdrInterval);
+    printf("mfxVideoParam.mfx.InitialDelayInKB: %d\n", param.mfx.InitialDelayInKB);
+    printf("mfxVideoParam.mfx.QPI: %d\n", param.mfx.QPI);
+    printf("mfxVideoParam.mfx.Accuracy: %d\n", param.mfx.Accuracy);
+    printf("mfxVideoParam.mfx.BufferSizeInKB: %d\n", param.mfx.BufferSizeInKB);
+    printf("mfxVideoParam.mfx.QPP: %d\n", param.mfx.QPP);
+    printf("mfxVideoParam.mfx.ICQQuality: %d\n", param.mfx.ICQQuality);
+    printf("mfxVideoParam.mfx.MaxKbps: %d\n", param.mfx.MaxKbps);
+    printf("mfxVideoParam.mfx.QPB: %d\n", param.mfx.QPB);
+    printf("mfxVideoParam.mfx.Convergence: %d\n", param.mfx.Convergence);
+    printf("mfxVideoParam.mfx.NumSlice: %d\n", param.mfx.NumSlice);
+    printf("mfxVideoParam.mfx.NumRefFrame: %d\n", param.mfx.NumRefFrame);
+    printf("mfxVideoParam.mfx.EncodedOrder: %d\n", param.mfx.EncodedOrder);
+    printf("mfxVideoParam.mfx.DecodedOrder: %d\n", param.mfx.DecodedOrder);
+    printf("mfxVideoParam.mfx.ExtendedPicStruct: %d\n", param.mfx.ExtendedPicStruct);
+    printf("mfxVideoParam.mfx.TimeStampCalc: %d\n", param.mfx.TimeStampCalc);
+    printf("mfxVideoParam.mfx.SliceGroupsPresent: %d\n", param.mfx.SliceGroupsPresent);
+    printf("mfxVideoParam.mfx.MaxDecFrameBuffering: %d\n", param.mfx.MaxDecFrameBuffering);
+    printf("mfxVideoParam.mfx.EnableReallocRequest: %d\n", param.mfx.EnableReallocRequest);
+    printf("mfxVideoParam.mfx.FilmGrain: %d\n", param.mfx.FilmGrain);
+    printf("mfxVideoParam.mfx.IgnoreLevelConstrain: %d\n", param.mfx.IgnoreLevelConstrain);
+    printf("mfxVideoParam.mfx.SkipOutput: %d\n", param.mfx.SkipOutput);
+    printf("mfxVideoParam.mfx.Interleaved: %d\n", param.mfx.Interleaved);
+    printf("mfxVideoParam.mfx.Quality: %d\n", param.mfx.Quality);
+    printf("mfxVideoParam.mfx.RestartInterval: %d\n\n", param.mfx.RestartInterval);
+    
+    printf("mfxVideoParam.mfx.FrameInfo.FourCC: %d\n", param.mfx.FrameInfo.FourCC);
+    printf("mfxVideoParam.mfx.FrameInfo.ChromaFormat: %d\n", param.mfx.FrameInfo.ChromaFormat);
+    printf("mfxVideoParam.mfx.FrameInfo.CropX: %d\n", param.mfx.FrameInfo.CropX);
+    printf("mfxVideoParam.mfx.FrameInfo.CropY: %d\n", param.mfx.FrameInfo.CropY);
+    printf("mfxVideoParam.mfx.FrameInfo.CropW: %d\n", param.mfx.FrameInfo.CropW);
+    printf("mfxVideoParam.mfx.FrameInfo.CropH: %d\n", param.mfx.FrameInfo.CropH);
+    printf("mfxVideoParam.mfx.FrameInfo.Width: %d\n", param.mfx.FrameInfo.Width);
+    printf("mfxVideoParam.mfx.FrameInfo.Height: %d\n", param.mfx.FrameInfo.Height);
+    printf("mfxVideoParam.mfx.FrameInfo.FrameRateExtN: %d\n", param.mfx.FrameInfo.FrameRateExtN);
+    printf("mfxVideoParam.mfx.FrameInfo.FrameRateExtD: %d\n", param.mfx.FrameInfo.FrameRateExtD);
+    printf("mfxVideoParam.mfx.FrameInfo.AspectRatioW: %d\n", param.mfx.FrameInfo.AspectRatioW);
+    printf("mfxVideoParam.mfx.FrameInfo.AspectRatioH: %d\n", param.mfx.FrameInfo.AspectRatioH);
+    printf("mfxVideoParam.mfx.FrameInfo.ChannelId: %d\n", param.mfx.FrameInfo.ChannelId);
+    printf("mfxVideoParam.mfx.FrameInfo.BitDepthLuma: %d\n", param.mfx.FrameInfo.BitDepthLuma);
+    printf("mfxVideoParam.mfx.FrameInfo.BitDepthChroma: %d\n", param.mfx.FrameInfo.BitDepthChroma);
+    printf("mfxVideoParam.mfx.FrameInfo.Shift: %d\n", param.mfx.FrameInfo.Shift);
+    printf("mfxVideoParam.mfx.FrameInfo.FrameId: %d\n", param.mfx.FrameInfo.Shift);
+    printf("mfxVideoParam.mfx.FrameInfo.BufferSize: %d\n", param.mfx.FrameInfo.Shift);
+    printf("mfxVideoParam.mfx.FrameInfo.PicStruct: %d\n", param.mfx.FrameInfo.PicStruct);
+    
 }
 
 void VplEncodeModule::push(cv::Mat image)
@@ -212,7 +348,9 @@ VplEncodeModule::~VplEncodeModule()
 
     if (session) {
         MFXVideoENCODE_Close(session);
+#ifdef USE_VPP
         MFXVideoVPP_Close(session);
+#endif // USE_VPP
         MFXClose(session);
     }
 
@@ -238,9 +376,11 @@ VplEncodeModule::~VplEncodeModule()
 
 void VplEncodeModule::EncodeLoop()
 {
+    bool temp = true;
     while (isStillGoing) {
         timeval tv1;
         gettimeofday(&tv1, nullptr);
+#ifdef USE_VPP
         // Load a new frame if not draining
         // 先把图读到vpp里，转I420
         while( (nIndexVPPInSurf = GetFreeSurfaceIndex(vppInSurfacePool, nSurfNumVPPIn)) < 0 ) usleep(1e3); // Find free input frame surface
@@ -253,7 +393,6 @@ void VplEncodeModule::EncodeLoop()
             printf("no image\n");
         }
         printf("have image %d\n", (int)!noImage);
-
         // 先取得一个vpp out surface，存放vpp输出结果
         while( (nIndexVPPOutSurf = GetFreeSurfaceIndex(vppOutSurfacePool, nSurfNumVPPOut)) < 0) usleep(1e3); // Find free output frame surface
         printf("get output free index %d\n", nIndexVPPOutSurf);
@@ -282,6 +421,34 @@ void VplEncodeModule::EncodeLoop()
                                               (noImage == true) ? NULL : &vppOutSurfacePool[nIndexVPPOutSurf],
                                               &bitstream,
                                               &syncp);
+
+        if(temp){
+            mfxVideoParam param;
+            MFXVideoENCODE_GetVideoParam(session, &param);
+            printf("************************************************");
+            PrintParam(param);
+            printf("************************************************");
+            temp = false;
+        }
+#else 
+        // Load a new frame if not draining
+        // 先把图读到vpp里，转I420
+        while( (nIndexEncInSurf = GetFreeSurfaceIndex(encSurfPool, nSurfNumEncIn)) < 0 ) usleep(1e3); // Find free input frame surface
+        printf("get input free index %d\n", nIndexEncInSurf);
+
+        sts = ReadFrame(&encSurfPool[nIndexEncInSurf]);
+        if(sts != MFX_ERR_NONE) {
+            usleep(1e3);
+            continue;
+            printf("no image\n");
+        }
+        printf("have image %d\n", (int)!noImage);
+        sts = MFXVideoENCODE_EncodeFrameAsync(session,
+                                              NULL,
+                                              (noImage == true) ? NULL : &encSurfPool[nIndexEncInSurf],
+                                              &bitstream,
+                                              &syncp);
+#endif // USE_VPP
         printf("Encode OK, sts %d\n", sts);
         switch (sts) {
             case MFX_ERR_NONE:
@@ -563,3 +730,27 @@ void VplEncodeModule::FreeAcceleratorHandle(void *accelHandle, int fd) {
 #endif
 }
 
+mfxU16 VplEncodeModule::FourCCToChromaFormat(mfxU32 fourCC)
+{
+    switch(fourCC)
+    {
+    case MFX_FOURCC_NV12:
+    case MFX_FOURCC_P010:
+    case MFX_FOURCC_P016:
+        return MFX_CHROMAFORMAT_YUV420;
+    case MFX_FOURCC_NV16:
+    case MFX_FOURCC_P210:
+    case MFX_FOURCC_Y210:
+    case MFX_FOURCC_Y216:
+    case MFX_FOURCC_YUY2:
+    case MFX_FOURCC_UYVY:
+        return MFX_CHROMAFORMAT_YUV422;
+    case MFX_FOURCC_Y410:
+    case MFX_FOURCC_A2RGB10:
+    case MFX_FOURCC_AYUV:
+    case MFX_FOURCC_RGB4:
+        return MFX_CHROMAFORMAT_YUV444;
+    }
+
+    return MFX_CHROMAFORMAT_YUV420;
+}
